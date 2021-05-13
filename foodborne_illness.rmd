@@ -1,0 +1,267 @@
+---
+title: "Foodborne Illnesses" ##TODO
+author: Amit, Devon, Kennedy
+date: 2020-11-27
+output: html_notebook
+---
+
+```{r libraries, echo = FALSE, message = FALSE, warning = FALSE}
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(usmap)
+library(modelr)
+library(splines)
+options(na.action = na.warn)
+```
+
+```{r setup, echo = FALSE, message = FALSE}
+df <- read_csv("data_outbreaks.csv")
+df %>%
+  filter(Species!="NA",
+         Hospitalizations!="NA",
+         State!="NA",
+         Fatalities!="NA",
+         Location!="NA",
+         Food!="NA") -> df.filtered
+```
+Heatmap of Years and Months (now from Jan->Dec, and with custom colours)
+```{r heatmap_years_months, echo = FALSE}
+df %>% mutate(month_dec = match(Month, month.name)) %>%
+  count(month_dec, Year) %>% ggplot(mapping = aes(x = month_dec, y= Year)) +
+  geom_tile(mapping = aes(fill =n), na.rm = FALSE)+
+  theme_bw()+theme_minimal() +
+  labs(title="Cases month wise from 1998-2015", x="Month", y="Year")+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line()) +
+  scale_x_continuous("Months", 1:12, labels = month.abb) +
+  ### Deciding on either month.name or month.abb (month.name currently too squished together to read
+  scale_fill_gradient(low="white", high="red") +
+  labs(fill = "Number of Cases")
+```
+Number of Illnesses per State
+```{r ill_per_state, echo = FALSE}
+df %>%
+  mutate(fips = fips(State)) %>%
+  group_by(fips,State) %>%
+  summarise(n=sum(Illnesses), .groups = "keep") %>%
+  plot_usmap(data = .,values = "n", color = "black") +
+  scale_fill_continuous(low = "white",
+                        high = "red",
+                        name = "Number of Illnesses",
+                        label = scales::comma
+                        ) +
+  theme(legend.position = "right") +
+  labs(title = "Illnesses per State")
+```
+
+```{r location_vs_illnesses, echo = FALSE, message = FALSE, include = FALSE}
+##OLD PLOT CLEANED UP
+df %>%
+  filter(Location!="NA",Location!="Unknown") %>%
+  group_by(Location) %>%
+  summarise(illness_location=sum(Illnesses), .groups = "drop") %>%
+  arrange(desc(illness_location)) %>%
+  filter(illness_location>2000)%>%ggplot()+
+  geom_bar(mapping = aes(y=Location, x=log2(illness_location)),
+              fill="red", stat = 'identity')+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+```
+Number of Illnesses at each Location Type <br />
+Could use some more work <br />
+I prefer this version over the old version because it doesn't exclude values under 2000, but also doesn't have two locations in one value.
+```{r locations_vs_illnesses_v2, echo = FALSE}
+separate_rows(df, Location, sep = "; ") %>%
+  filter(!is.na(Location),Location != "Unknown", Location != "Other(Descripe In Remarks)") %>%
+  group_by(Location) %>%
+  summarise(illness_location=sum(Illnesses), .groups = "drop") %>%
+  arrange(illness_location) %>%
+  ggplot() +
+  geom_bar(mapping = aes(y=Location, x=log2(illness_location)),
+           fill="red",
+           stat = 'identity') +
+  xlab(bquote(~Log[2]~ "of Illness Location")) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+```
+Species responsible for highest number of cases <br />
+I removed the legend because it didn't display any new information, and cleaned up the code a bit. This plot probably still needs some work.
+```{r species_number, echo = FALSE}
+separate_rows(df, Species, sep = "; ") %>%
+  filter(Species!="NA") %>%
+  group_by(Species) %>%
+  summarise(ill_species =sum(Illnesses), .groups = "drop") %>%
+  arrange(ill_species) %>%
+  filter(ill_species > 64) %>%
+  ggplot() +
+    geom_col(mapping = aes(y=Species,x=log2(ill_species), fill=Species)) +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_line(colour = "black"),
+          legend.position = "none") +
+  ggtitle("Number of Illnesses Caused by Species (LOG2)") +
+  xlab(bquote(~Log[2]~ "of Number of Illnesses")) +
+  ylab("Name of Species")
+
+```
+I tidied up a lot of this code, but I couldn't replicate the final model, so I left it around. <br />
+I also created a
+```{r plot, echo = FALSE, message = FALSE}
+#Species responsible for highest number of hospitalizations
+
+separate_rows(df, Species, sep = "; ") %>%
+  filter(!is.na(Species), !is.na(Hospitalizations), !is.na(Fatalities), !is.na(Illnesses)) %>%
+  group_by(Species) %>%
+  summarise(ill_species =sum(Illnesses),
+            hospitalizations=sum(Hospitalizations),
+            fatalities=sum(Fatalities),
+            .groups = "drop") %>%
+  filter(ill_species < 40000, hospitalizations < 600) -> df.species
+ggplot(df.species) +
+  geom_point(position = "jitter", aes(x= hospitalizations, y= ill_species)) +
+  ggtitle("Number of Illnesses and Hospitalizations Caused by Species") +
+  xlab("Number of Hospitalizations") +
+  ylab("Number of Illnesses")
+
+par <- coef(lm(ill_species~hospitalizations, data = df.species))
+
+df.species %>%
+  ggplot(mapping=aes(y=ill_species,x=hospitalizations)) +
+  geom_point(position = "jitter") +
+  geom_abline(intercept = par[1], slope = par[2]) +
+  ggtitle("Linear Model of Number of Illnesses and Hospitalizations Caused by Species") +
+  xlab("Number of Hospitalizations") +
+  ylab("Number of Illnesses")
+
+model <- lm(ill_species~ns(hospitalizations,3), data = df.species)
+grid <- df.species %>% data_grid(hospitalizations) %>%
+  add_predictions(model)
+
+df.species %>%
+  ggplot(aes(hospitalizations)) +
+  geom_point(aes(y=ill_species),position = "jitter") +
+  geom_line(aes(y=pred), data=grid, colour="red", size=1) +
+  ggtitle("Model of Number of Illnesses and Hospitalizations Caused by Species") +
+  xlab("Number of Hospitalizations") +
+  ylab("Number of Illnesses")
+```
+Modeling from logs shows a clearer correlation, but the data is transformed to account for log(0).
+```{r log_model, echo = FALSE, message = FALSE}
+separate_rows(df, Species, sep = "; ") %>%
+  filter(!is.na(Species), !is.na(Hospitalizations), !is.na(Fatalities), !is.na(Illnesses)) %>%
+  group_by(Species) %>%
+  summarise(ill_species =sum(Illnesses),
+            hospitalizations=sum(Hospitalizations),
+            fatalities=sum(Fatalities),
+            .groups = "drop") %>%
+  #filter(hospitalizations > 0, ill_species > 0) %>%   ## The other option instead of adding 1.
+  mutate(hospitalizations = log2(hospitalizations + 1),
+         ill_species = log2(ill_species + 1)) -> df.species_l
+
+model <- lm(ill_species~ns(hospitalizations,3), data = df.species_l)
+grid <- df.species_l %>% data_grid(hospitalizations) %>%
+  add_predictions(model)
+df.species_l %>%
+  ggplot(aes(hospitalizations)) +
+  geom_point(aes(y=ill_species),position = "jitter") +
+  geom_line(aes(y=pred), data=grid, colour="red", size=1) +
+  ggtitle("Model of Number of Illnesses and Hospitalizations Caused by Species (LOG2)") +
+  xlab(bquote(~Log[2]~ "of Hospitalizations")) +
+  ylab(bquote(~Log[2]~ "of the Number of Illnesses"))
+
+```
+This is the old plot, it appears more smooth than the one I recreated.
+```{r old_plot, echo = FALSE, message = FALSE}
+## I restructured the first few variables so that they wouldn't output to the md file.
+df %>%
+  filter(Species!="NA") %>%
+  group_by(Species) %>%
+  summarise(ill_species =sum(Illnesses), .groups = "drop") %>%
+  arrange(ill_species) -> species_cases
+
+df %>%
+  filter(Species!="NA",Hospitalizations!="NA") %>%
+  group_by(Species) %>%
+  summarise(hospitalizations=sum(Hospitalizations), .groups = "drop") %>%
+  arrange(desc(hospitalizations)) -> species_hospitalization
+
+#Species associated with the highest number of fatalities
+df %>%
+  filter(Species!="NA",Fatalities!="NA") %>%
+  group_by(Species) %>%
+  summarise(fatalities=sum(Fatalities), .groups = "drop") %>%
+  arrange(desc(fatalities)) -> species_fatalities
+
+#Combining both species_cases,species_hospitalizations, and species_fatalities
+species_1 <- merge(species_hospitalization, species_fatalities)
+
+species_merge <- merge(species_1,species_cases)
+
+#Scatter plot and model between hospitalizations and illnesses
+species_subMerge <- species_merge%>%filter(hospitalizations<600,
+                                   ill_species<40000)
+
+model <- lm(ill_species~ns(hospitalizations,3), data = species_subMerge)
+grid <- species_subMerge %>% data_grid(hospitalizations) %>%
+  add_predictions(model)
+
+df.species%>%ggplot(aes(hospitalizations))+
+  geom_point(aes(y=ill_species),position = "jitter")+
+  geom_line(aes(y=pred), data=grid, colour="red", size=1)+
+  ggtitle("Model between illness and hospitalizations")
+```
+for some reason the scatter plots don't want to plot in with the other things
+```{r, echo = FALSE, include = FALSE}
+ggplot(data = df.species) +
+  geom_point(aes(x = hospitalizations, y = ill_species))
+ggplot(data = df.species) +
+  geom_point(aes(x = fatalities, y = ill_species))
+ggplot(data = df.species) +
+  geom_point(aes(x = hospitalizations, y = fatalities))
+```
+
+```{r more_stuff, echo = FALSE}
+# scatter plot in columnwise
+par(mfrow=c(2,2))
+plot(df.species$hospitalizations, df.species$ill_species)
+plot(df.species$fatalities, df.species$ill_species)
+plot(df.species$hospitalizations, df.species$fatalities)
+```
+
+```{r even more stuff, echo = FALSE}
+#highest hospitalized cases across all states
+df %>%
+  filter(Hospitalizations>0) %>%
+  group_by(State) %>%
+  summarise(Total_hospitalized_cases=sum(Hospitalizations), Total_illness=sum(Illnesses), .groups = "drop") %>%
+  arrange(desc(Total_hospitalized_cases), desc(Total_illness)) -> Highest_hospitalized_cases
+
+#Relation between Illnesses and hospitalizations
+ggplot(Highest_hospitalized_cases) +
+  geom_freqpoly(mapping = aes(x=Total_hospitalized_cases, color="green") )
+
+#Number of illnesses per year in descending order
+df.filtered %>%
+  group_by(Year,Location, Status) %>%
+  mutate(Hospitalizations = replace_na(Hospitalizations,0)) %>%
+  mutate(Fatalities = replace_na(Fatalities,0)) %>%
+  summarise(outbreaks = n(),
+            illnesses = sum(Illnesses),
+            hospitalizations = sum(Hospitalizations),
+            fatalities = sum(Fatalities),
+            status=sum(),
+            .groups = "keep") %>%
+  arrange(desc(illnesses)) -> df.num
+
+#Histogram of year and illnesses
+ggplot(df.num)+geom_col(mapping=aes(x=Year, y=illnesses), fill="maroon")
+```
